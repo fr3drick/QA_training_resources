@@ -1,0 +1,7 @@
+case,email,password,expected_status
+valid customer,efe@example.com,Passw0rd!,200
+wrong password,efe@example.com,passw0rd!,401
+unknown email,nobody@example.com,Passw0rd!,401
+disabled account,bola@example.com,Passw0rd!,403
+empty password,efe@example.com,,400
+empty email,,Passw0rd!,400

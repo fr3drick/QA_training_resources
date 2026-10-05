@@ -1,0 +1,10 @@
+[
+  { "case": "qty 0 (below min)",  "qty": 0,    "expected_status": 400 },
+  { "case": "qty 1 (min)",        "qty": 1,    "expected_status": 201 },
+  { "case": "qty 10 (max)",       "qty": 10,   "expected_status": 201 },
+  { "case": "qty 11 (above max)", "qty": 11,   "expected_status": 400 },
+  { "case": "qty -1",             "qty": -1,   "expected_status": 400 },
+  { "case": "qty 1.5",            "qty": 1.5,  "expected_status": 400 },
+  { "case": "qty as a string",    "qty": "2",  "expected_status": 400 },
+  { "case": "qty null",           "qty": null, "expected_status": 400 }
+]

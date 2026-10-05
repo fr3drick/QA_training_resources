@@ -1,0 +1,1640 @@
+{
+  "info": {
+    "name": "QA Shop API",
+    "description": "Reference collection for the QA Shop practice API (Weeks 5-8). Build your own first, then compare. Set the \"local\" environment before running.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{access_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Runs before EVERY request: make sure we hold a valid token, so any folder",
+          "// (or any single request) can run on its own.",
+          "const token = pm.environment.get(\"access_token\");",
+          "const expiresAt = Number(pm.environment.get(\"access_token_expires_at\") || 0);",
+          "if (!token || Date.now() > expiresAt - 60000) {",
+          "    pm.sendRequest({",
+          "        url: pm.environment.get(\"base_url\") + \"/auth/login\",",
+          "        method: \"POST\",",
+          "        header: { \"Content-Type\": \"application/json\" },",
+          "        body: { mode: \"raw\", raw: JSON.stringify({",
+          "            email: pm.environment.get(\"customer_email\"),",
+          "            password: pm.environment.get(\"customer_password\")",
+          "        }) }",
+          "    }, (err, res) => {",
+          "        if (err || res.code !== 200) {",
+          "            console.error(\"Auto-login failed\", err || res.code);",
+          "            return;",
+          "        }",
+          "        pm.environment.set(\"access_token\", res.json().access_token);",
+          "        pm.environment.set(\"access_token_expires_at\", Date.now() + res.json().expires_in * 1000);",
+          "    });",
+          "}"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Runs after EVERY request in the collection.",
+          "pm.test(\"[all] Responds in under 2000 ms\", () => {",
+          "    pm.expect(pm.response.responseTime).to.be.below(2000);",
+          "});",
+          "pm.test(\"[all] Responds with JSON\", () => {",
+          "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/json\");",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "01 Smoke",
+      "description": "Fast checks that the build is worth testing. Run these first; stop if they fail.",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/health",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Service and database are up\", () => {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.status).to.eql(\"ok\");",
+                  "    pm.expect(body.db).to.eql(\"up\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login - valid customer (R6)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{customer_email}}\",\n  \"password\": \"{{customer_password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Returns a bearer token\", () => {",
+                  "    pm.expect(body.access_token).to.be.a(\"string\").and.not.be.empty;",
+                  "    pm.expect(body.access_token.split(\".\")).to.have.lengthOf(3);",
+                  "    pm.expect(body.token_type).to.eql(\"Bearer\");",
+                  "    pm.expect(body.expires_in).to.eql(3600);",
+                  "});",
+                  "pm.environment.set(\"access_token\", body.access_token);",
+                  "pm.environment.set(\"access_token_expires_at\", Date.now() + body.expires_in * 1000);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List products - first page (R7)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/products",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Default page of 20 with pagination metadata\", () => {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.data).to.be.an(\"array\").with.lengthOf(20);",
+                  "    pm.expect(body.page).to.eql(1);",
+                  "    pm.expect(body.limit).to.eql(20);",
+                  "    pm.expect(body.total).to.be.a(\"number\").above(20);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 Auth",
+      "description": "Registration, login and token handling.",
+      "item": [
+        {
+          "name": "Register - new customer (R1)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"first_name\": \"{{$randomFirstName}}\",\n  \"last_name\": \"{{$randomLastName}}\",\n  \"email\": \"{{new_email}}\",\n  \"password\": \"Passw0rd!\",\n  \"country\": \"NG\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A unique email on every run, so the test can be repeated.",
+                  "pm.environment.set(\"new_email\", \"qa.intern+\" + Date.now() + \"@example.com\");"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 201\", () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Echoes the customer, never the password\", () => {",
+                  "    pm.expect(body.id).to.be.a(\"number\");",
+                  "    pm.expect(body.email).to.eql(pm.environment.get(\"new_email\"));",
+                  "    pm.expect(body.is_active).to.eql(true);",
+                  "    pm.expect(body).to.not.have.any.keys(\"password\", \"password_hash\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register - duplicate email (R2)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"first_name\": \"Efe\",\n  \"last_name\": \"Again\",\n  \"email\": \"efe@example.com\",\n  \"password\": \"Passw0rd!\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 409\", () => pm.response.to.have.status(409));",
+                  "pm.test(\"Error message says why\", () => pm.expect(pm.response.json().error).to.match(/already registered/i));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register - missing required fields (R1)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"first_name\": \"Efe\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"Names every missing field\", () => {",
+                  "    pm.expect(pm.response.json().fields).to.have.members([\"last_name\", \"email\", \"password\"]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register - password too short (7 chars) (R3)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"first_name\": \"Short\",\n  \"last_name\": \"Password\",\n  \"email\": \"short.pw@example.com\",\n  \"password\": \"Pass12!\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"Explains the rule\", () => pm.expect(pm.response.json().error).to.include(\"at least 8\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login - wrong password (R4)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{customer_email}}\",\n  \"password\": \"WrongPassword1\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 401\", () => pm.response.to.have.status(401));",
+                  "pm.test(\"No token issued\", () => pm.expect(pm.response.json()).to.not.have.property(\"access_token\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login - disabled account (R5)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{disabled_email}}\",\n  \"password\": \"{{customer_password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 403\", () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Me - no token (R6)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/me",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 401\", () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Me - tampered token (R6)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/me",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{tampered_token}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Flip the last character of the signature.",
+                  "const token = pm.environment.get(\"access_token\");",
+                  "const last = token.slice(-1) === \"A\" ? \"B\" : \"A\";",
+                  "pm.variables.set(\"tampered_token\", token.slice(0, -1) + last);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 401\", () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Me - valid token (R6)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/me"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Returns the logged-in customer\", () => {",
+                  "    pm.expect(pm.response.json().email).to.eql(pm.environment.get(\"customer_email\"));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 Products",
+      "description": "Catalogue browsing and search.",
+      "item": [
+        {
+          "name": "Get product - valid id (R9)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/products/1",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "const schema = {",
+                  "    \"type\": \"object\",",
+                  "    \"required\": [",
+                  "        \"id\",",
+                  "        \"sku\",",
+                  "        \"name\",",
+                  "        \"category\",",
+                  "        \"price\",",
+                  "        \"stock\"",
+                  "    ],",
+                  "    \"properties\": {",
+                  "        \"id\": {",
+                  "            \"type\": \"integer\"",
+                  "        },",
+                  "        \"sku\": {",
+                  "            \"type\": \"string\"",
+                  "        },",
+                  "        \"name\": {",
+                  "            \"type\": \"string\",",
+                  "            \"minLength\": 1",
+                  "        },",
+                  "        \"description\": {",
+                  "            \"type\": [",
+                  "                \"string\",",
+                  "                \"null\"",
+                  "            ]",
+                  "        },",
+                  "        \"category\": {",
+                  "            \"type\": \"string\",",
+                  "            \"enum\": [",
+                  "                \"electronics\",",
+                  "                \"books\",",
+                  "                \"home\",",
+                  "                \"fashion\",",
+                  "                \"grocery\",",
+                  "                \"toys\"",
+                  "            ]",
+                  "        },",
+                  "        \"price\": {",
+                  "            \"type\": \"number\",",
+                  "            \"minimum\": 0",
+                  "        },",
+                  "        \"stock\": {",
+                  "            \"type\": \"integer\"",
+                  "        }",
+                  "    },",
+                  "    \"additionalProperties\": false",
+                  "};",
+                  "pm.test(\"Matches the product schema\", () => pm.response.to.have.jsonSchema(schema));",
+                  "pm.test(\"Correct product\", () => pm.expect(pm.response.json().sku).to.eql(\"ELEC-001\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get product - does not exist (R9)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/products/999999",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 404\", () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get product - inactive product is hidden (R8)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/products/20",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 404\", () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List products - filter by category (R8)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/products?category=books&limit=50",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Every product is a book\", () => {",
+                  "    const data = pm.response.json().data;",
+                  "    pm.expect(data).to.not.be.empty;",
+                  "    data.forEach((p) => pm.expect(p.category).to.eql(\"books\"));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search - finds by name (R10)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/products/search?q=jollof",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Finds the Jollof Pot\", () => {",
+                  "    const names = pm.response.json().data.map((p) => p.name);",
+                  "    pm.expect(names).to.include(\"Limited Edition Jollof Pot\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search - query too short (R10)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/products/search?q=a",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 Order workflow",
+      "description": "A chained end-to-end journey: create -> read -> pay -> cancel. Run in order.",
+      "item": [
+        {
+          "name": "Create order - no token (R6)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 401\", () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create order - 2 x Ceramic Mug (R16)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": 2\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 201\", () => pm.response.to.have.status(201));",
+                  "const order = pm.response.json();",
+                  "const schema = {",
+                  "    \"type\": \"object\",",
+                  "    \"required\": [",
+                  "        \"id\",",
+                  "        \"customer_id\",",
+                  "        \"status\",",
+                  "        \"subtotal\",",
+                  "        \"discount\",",
+                  "        \"total_amount\",",
+                  "        \"currency\",",
+                  "        \"items\",",
+                  "        \"created_at\"",
+                  "    ],",
+                  "    \"properties\": {",
+                  "        \"id\": {",
+                  "            \"type\": \"integer\"",
+                  "        },",
+                  "        \"customer_id\": {",
+                  "            \"type\": \"integer\"",
+                  "        },",
+                  "        \"status\": {",
+                  "            \"type\": \"string\",",
+                  "            \"enum\": [",
+                  "                \"pending\",",
+                  "                \"paid\",",
+                  "                \"shipped\",",
+                  "                \"delivered\",",
+                  "                \"cancelled\"",
+                  "            ]",
+                  "        },",
+                  "        \"subtotal\": {",
+                  "            \"type\": \"number\",",
+                  "            \"minimum\": 0",
+                  "        },",
+                  "        \"discount\": {",
+                  "            \"type\": \"number\",",
+                  "            \"minimum\": 0",
+                  "        },",
+                  "        \"total_amount\": {",
+                  "            \"type\": \"number\",",
+                  "            \"minimum\": 0",
+                  "        },",
+                  "        \"coupon_code\": {",
+                  "            \"type\": [",
+                  "                \"string\",",
+                  "                \"null\"",
+                  "            ]",
+                  "        },",
+                  "        \"currency\": {",
+                  "            \"const\": \"NGN\"",
+                  "        },",
+                  "        \"items\": {",
+                  "            \"type\": \"array\",",
+                  "            \"minItems\": 1,",
+                  "            \"items\": {",
+                  "                \"type\": \"object\",",
+                  "                \"required\": [",
+                  "                    \"product_id\",",
+                  "                    \"qty\",",
+                  "                    \"unit_price\",",
+                  "                    \"line_total\"",
+                  "                ],",
+                  "                \"properties\": {",
+                  "                    \"product_id\": {",
+                  "                        \"type\": \"integer\"",
+                  "                    },",
+                  "                    \"qty\": {",
+                  "                        \"type\": \"integer\",",
+                  "                        \"minimum\": 1,",
+                  "                        \"maximum\": 10",
+                  "                    },",
+                  "                    \"unit_price\": {",
+                  "                        \"type\": \"number\"",
+                  "                    },",
+                  "                    \"line_total\": {",
+                  "                        \"type\": \"number\"",
+                  "                    }",
+                  "                }",
+                  "            }",
+                  "        },",
+                  "        \"created_at\": {",
+                  "            \"type\": \"string\"",
+                  "        },",
+                  "        \"updated_at\": {",
+                  "            \"type\": \"string\"",
+                  "        }",
+                  "    }",
+                  "};",
+                  "pm.test(\"Matches the order schema\", () => pm.response.to.have.jsonSchema(schema));",
+                  "pm.test(\"Totals are correct: 2 x 3500\", () => {",
+                  "    pm.expect(order.subtotal).to.eql(7000);",
+                  "    pm.expect(order.discount).to.eql(0);",
+                  "    pm.expect(order.total_amount).to.eql(7000);",
+                  "});",
+                  "pm.test(\"New orders start as pending\", () => pm.expect(order.status).to.eql(\"pending\"));",
+                  "pm.test(\"Location header points at the new order\", () => {",
+                  "    pm.expect(pm.response.headers.get(\"Location\")).to.eql(\"/orders/\" + order.id);",
+                  "});",
+                  "pm.environment.set(\"order_id\", order.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get order - own order (R17)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/orders/{{order_id}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Same order, still pending\", () => {",
+                  "    const order = pm.response.json();",
+                  "    pm.expect(order.id).to.eql(Number(pm.environment.get(\"order_id\")));",
+                  "    pm.expect(order.status).to.eql(\"pending\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Pay order (R18)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/orders/{{order_id}}/pay"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Status moves to paid\", () => pm.expect(pm.response.json().status).to.eql(\"paid\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Pay order - again (R18)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/orders/{{order_id}}/pay"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 409\", () => pm.response.to.have.status(409));",
+                  "pm.test(\"Explains the current state\", () => pm.expect(pm.response.json().error).to.include(\"paid\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel order - paid order can be cancelled (R19)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/orders/{{order_id}}/cancel"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Status moves to cancelled\", () => pm.expect(pm.response.json().status).to.eql(\"cancelled\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel order - again (R19)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/orders/{{order_id}}/cancel"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 409\", () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "My orders - includes the new order (R17)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/orders"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 200\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"Order appears in my list\", () => {",
+                  "    const ids = pm.response.json().data.map((o) => o.id);",
+                  "    pm.expect(ids).to.include(Number(pm.environment.get(\"order_id\")));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 Order validation",
+      "description": "Negative and boundary tests for POST /orders.",
+      "item": [
+        {
+          "name": "Create order - empty items (R11)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": []\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create order - qty 1 (lower boundary) (R11)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 201\", () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create order - qty 10 (upper boundary) (R11)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": 10\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 201\", () => pm.response.to.have.status(201));",
+                  "pm.test(\"Total is 10 x 3500\", () => pm.expect(pm.response.json().total_amount).to.eql(35000));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create order - qty 11 (above boundary) (R11)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": 11\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create order - qty as a string (R11)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": \"2\"\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create order - inactive product (R12)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 20,\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 422\", () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create order - expired coupon (R14)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": 1\n    }\n  ],\n  \"coupon_code\": \"EXPIRED15\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 422\", () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create order - below coupon minimum (R14)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": 1\n    }\n  ],\n  \"coupon_code\": \"WELCOME10\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 422\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"Explains the minimum\", () => pm.expect(pm.response.json().error).to.include(\"5000\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create order - valid coupon WELCOME10 (R16)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{coupon_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": 2\n    }\n  ],\n  \"coupon_code\": \"WELCOME10\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Log in before this request and store the token in \"coupon_token\".",
+                  "pm.sendRequest({",
+                  "    url: pm.environment.get(\"base_url\") + \"/auth/login\",",
+                  "    method: \"POST\",",
+                  "    header: { \"Content-Type\": \"application/json\" },",
+                  "    body: { mode: \"raw\", raw: JSON.stringify({",
+                  "        email: pm.environment.get(\"coupon_customer_email\"),",
+                  "        password: pm.environment.get(\"customer_password\")",
+                  "    }) }",
+                  "}, (err, res) => {",
+                  "    pm.expect(err).to.equal(null);",
+                  "    pm.environment.set(\"coupon_token\", res.json().access_token);",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 201\", () => pm.response.to.have.status(201));",
+                  "pm.test(\"10% off 7000\", () => {",
+                  "    const order = pm.response.json();",
+                  "    pm.expect(order.subtotal).to.eql(7000);",
+                  "    pm.expect(order.discount).to.eql(700);",
+                  "    pm.expect(order.total_amount).to.eql(6300);",
+                  "    pm.expect(order.coupon_code).to.eql(\"WELCOME10\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "06 Data-driven login",
+      "description": "Run with a data file: newman run ... --folder \"06 Data-driven login\" -d data/login-cases.csv. Without a data file the request skips itself.",
+      "item": [
+        {
+          "name": "Login - {{case}} (R4, R5)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.iterationData.has(\"expected_status\")) {",
+                  "    pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const expected = Number(pm.iterationData.get(\"expected_status\"));",
+                  "pm.test(pm.iterationData.get(\"case\") + \" -> \" + expected, () => {",
+                  "    pm.response.to.have.status(expected);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "99 Known defects",
+      "description": "Each request asserts the CORRECT behaviour, so it fails while the defect exists. Quarantined: run separately and never block the pipeline on this folder. When a test here starts passing, the bug is fixed — move the test to its proper folder.",
+      "item": [
+        {
+          "name": "BOLA - customer can read another customer's order (R17)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/orders/{{other_customer_order_id}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Another customer's order is not visible (403 or 404)\", () => {",
+                  "    pm.expect(pm.response.code).to.be.oneOf([403, 404]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Boundary - qty 0 is accepted (R11)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": 0\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "State - delivered order can be cancelled (R19)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/orders/{{delivered_order_id}}/cancel"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"A delivered order cannot be cancelled (409)\", () => pm.response.to.have.status(409));",
+                  "pm.test(\"...and the reason is that it was delivered, not that it was already cancelled\", () => {",
+                  "    pm.expect(pm.response.json().error).to.not.include(\"already cancelled\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Coupon - WELCOME10 can be used twice (R15)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/orders",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{coupon_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"product_id\": 6,\n      \"qty\": 2\n    }\n  ],\n  \"coupon_code\": \"WELCOME10\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Log in as the coupon customer, use WELCOME10 once, then this request uses it again.",
+                  "const base = pm.environment.get(\"base_url\");",
+                  "pm.sendRequest({",
+                  "    url: base + \"/auth/login\",",
+                  "    method: \"POST\",",
+                  "    header: { \"Content-Type\": \"application/json\" },",
+                  "    body: { mode: \"raw\", raw: JSON.stringify({",
+                  "        email: pm.environment.get(\"coupon_customer_email\"),",
+                  "        password: pm.environment.get(\"customer_password\")",
+                  "    }) }",
+                  "}, (err, res) => {",
+                  "    const token = res.json().access_token;",
+                  "    pm.environment.set(\"coupon_token\", token);",
+                  "    pm.sendRequest({",
+                  "        url: base + \"/orders\",",
+                  "        method: \"POST\",",
+                  "        header: { \"Content-Type\": \"application/json\", \"Authorization\": \"Bearer \" + token },",
+                  "        body: { mode: \"raw\", raw: JSON.stringify({ items: [{ product_id: 6, qty: 2 }], coupon_code: \"WELCOME10\" }) }",
+                  "    }, (err2, first) => console.log(\"First use of WELCOME10 returned\", first.code));",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Second use of a one-per-customer coupon is rejected (409)\", () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Registration - same email in different case (R2)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/register",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"first_name\": \"Dup\",\n  \"last_name\": \"Upper\",\n  \"email\": \"{{dup_email_upper}}\",\n  \"password\": \"Passw0rd!\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Register a lower-case address first, then try the upper-case version in this request.",
+                  "const stamp = Date.now();",
+                  "pm.variables.set(\"dup_email_upper\", \"DUP.\" + stamp + \"@EXAMPLE.COM\");",
+                  "pm.sendRequest({",
+                  "    url: pm.environment.get(\"base_url\") + \"/auth/register\",",
+                  "    method: \"POST\",",
+                  "    header: { \"Content-Type\": \"application/json\" },",
+                  "    body: { mode: \"raw\", raw: JSON.stringify({",
+                  "        first_name: \"Dup\", last_name: \"Lower\",",
+                  "        email: \"dup.\" + stamp + \"@example.com\", password: \"Passw0rd!\"",
+                  "    }) }",
+                  "}, (err, res) => pm.expect(res.code).to.eql(201));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Email addresses are unique regardless of case (409)\", () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Error handling - non-numeric product id (R9)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/products/abc",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Error handling - page=0 (R7)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/products?page=0",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Error handling - malformed JSON leaks a stack trace (R20, R21)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\": \"efe@example.com\", "
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 400\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"No stack trace or internal paths in the response\", () => {",
+                  "    pm.expect(pm.response.json()).to.not.have.property(\"stack\");",
+                  "    pm.expect(pm.response.text()).to.not.match(/node_modules|at \\w+ \\(/);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Security - login reveals which emails exist (R4)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/auth/login",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"nobody.here@example.com\",\n  \"password\": \"WrongPassword1\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status is 401\", () => pm.response.to.have.status(401));",
+                  "pm.test(\"Unknown email gives the same message as a wrong password\", () => {",
+                  "    pm.expect(pm.response.json().error).to.eql(\"Invalid email or password\");",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Performance - limit is not capped (R7)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/products?limit=100000",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Large limits are rejected or capped at 100\", () => {",
+                  "    if (pm.response.code === 200) {",
+                  "        pm.expect(pm.response.json().data.length).to.be.at.most(100);",
+                  "    } else {",
+                  "        pm.expect(pm.response.code).to.eql(400);",
+                  "    }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

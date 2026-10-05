@@ -1,0 +1,212 @@
+# QA Shop — reference pipeline (Week 8)
+#
+# To use it: copy this file to the ROOT of your GitLab project as .gitlab-ci.yml.
+# It runs against the reference/ test assets. Point the *_DIR variables below at
+# your own postman/, jmeter/ and sql/ folders once yours are complete.
+#
+# Pipeline shape:
+#
+#   smoke ──► test ─────────────► data ──────────► performance
+#   api-smoke  api-regression      data-integrity    perf-load (main, schedules, or manual)
+#              api-known-defects*                    * = allowed to fail (quarantine)
+#
+# Every job gets its OWN fresh Postgres service and starts its OWN copy of the API.
+# Jobs share nothing except the files passed between them as artifacts.
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - smoke
+  - test
+  - data
+  - performance
+
+variables:
+  # Postgres service configuration (read by the postgres image)
+  POSTGRES_DB: qa_shop
+  POSTGRES_USER: qa
+  POSTGRES_PASSWORD: qa
+  # Where the API finds the database, and where the tests find the API
+  DATABASE_URL: "postgres://qa:qa@postgres:5432/qa_shop"
+  BASE_URL: "http://localhost:3000"
+  # Test assets
+  POSTMAN_DIR: reference/postman
+  JMETER_DIR: reference/jmeter
+  SQL_DIR: reference/sql
+  COLLECTION: "$POSTMAN_DIR/qa-shop.postman_collection.json"
+  ENVIRONMENT: "$POSTMAN_DIR/local.postman_environment.json"
+  # Tool versions
+  NEWMAN_VERSION: "6"
+  JMETER_VERSION: "5.6.3"
+  # Performance profile (override when running a pipeline manually)
+  PERF_THREADS: "20"
+  PERF_RAMPUP: "30"
+  PERF_DURATION: "120"
+  PERF_P95_MS: "1000"
+  PERF_ERROR_PCT: "1"
+
+default:
+  image: node:24-bookworm
+  services:
+    - name: postgres:17-alpine
+      alias: postgres
+  cache:
+    key:
+      files:
+        - app/package-lock.json
+    paths:
+      - .npm/
+  interruptible: true
+
+# ---------------------------------------------------------------------------
+# Reusable building blocks
+# ---------------------------------------------------------------------------
+.with-api:
+  before_script:
+    - npm ci --prefix app --cache .npm --prefer-offline --no-audit --no-fund
+    - npm install -g --cache .npm "newman@${NEWMAN_VERSION}" newman-reporter-htmlextra --no-audit --no-fund
+    - mkdir -p reports
+    # Start the API in the background; it creates and seeds the schema on first start.
+    - node app/src/server.js > reports/api.log 2>&1 &
+    - |
+      for i in $(seq 1 60); do
+        curl -fs "$BASE_URL/health" && echo && break
+        echo "Waiting for the API ($i/60)..."; sleep 2
+      done
+    - curl -fsS "$BASE_URL/health"
+
+
+# ---------------------------------------------------------------------------
+# Stage: smoke — is this build worth testing at all?
+# ---------------------------------------------------------------------------
+api-smoke:
+  stage: smoke
+  extends: .with-api
+  script:
+    - >-
+      newman run "$COLLECTION" -e "$ENVIRONMENT" --env-var "base_url=$BASE_URL"
+      --folder "01 Smoke"
+      --bail
+      -r cli,junit
+      --reporter-junit-export reports/smoke-junit.xml
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - reports/
+    reports:
+      junit: reports/smoke-junit.xml
+
+# ---------------------------------------------------------------------------
+# Stage: test — the API regression suite
+# ---------------------------------------------------------------------------
+api-regression:
+  stage: test
+  extends: .with-api
+  script:
+    - >-
+      newman run "$COLLECTION" -e "$ENVIRONMENT" --env-var "base_url=$BASE_URL"
+      --folder "02 Auth" --folder "03 Products"
+      --folder "04 Order workflow" --folder "05 Order validation"
+      -r cli,junit,htmlextra
+      --reporter-junit-export reports/regression-junit.xml
+      --reporter-htmlextra-export reports/regression.html
+    - >-
+      newman run "$COLLECTION" -e "$ENVIRONMENT" --env-var "base_url=$BASE_URL"
+      --folder "06 Data-driven login"
+      -d "$POSTMAN_DIR/data/login-cases.csv"
+      -r cli,junit
+      --reporter-junit-export reports/data-driven-junit.xml
+  artifacts:
+    when: always
+    expire_in: 1 week
+    expose_as: "API regression report"
+    paths:
+      - reports/
+    reports:
+      junit: reports/*-junit.xml
+
+api-known-defects:
+  stage: test
+  extends: .with-api
+  # Quarantine: these tests assert correct behaviour for bugs that are not fixed yet.
+  # They must not block the pipeline, but they must stay visible.
+  allow_failure: true
+  script:
+    - >-
+      newman run "$COLLECTION" -e "$ENVIRONMENT" --env-var "base_url=$BASE_URL"
+      --folder "99 Known defects"
+      -r cli,junit
+      --reporter-junit-export reports/known-defects-junit.xml
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - reports/
+    reports:
+      junit: reports/known-defects-junit.xml
+
+# ---------------------------------------------------------------------------
+# Stage: data — what did the tests leave behind in the database?
+# ---------------------------------------------------------------------------
+data-integrity:
+  stage: data
+  extends: .with-api
+  needs: ["api-smoke"]
+  # The seed data contains known historical defects, so this job fails until they
+  # are fixed. Make it blocking (remove allow_failure) once the baseline is clean.
+  allow_failure: true
+  script:
+    - apt-get update -qq && apt-get install -y -qq postgresql-client > /dev/null
+    # Exercise the system first, so the checks also catch damage done by the API itself.
+    - newman run "$COLLECTION" -e "$ENVIRONMENT" --env-var "base_url=$BASE_URL" --folder "04 Order workflow" --folder "05 Order validation" --folder "99 Known defects" -r cli > reports/exercise.log || true
+    # psql exits non-zero when a critical check fails; print the report either way.
+    - psql "$DATABASE_URL" -f "$SQL_DIR/data-checks.sql" > reports/data-checks.txt 2>&1 || { cat reports/data-checks.txt; exit 1; }
+    - cat reports/data-checks.txt
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - reports/
+
+# ---------------------------------------------------------------------------
+# Stage: performance — runs on the default branch, on schedules, or on demand
+# ---------------------------------------------------------------------------
+perf-load:
+  stage: performance
+  extends: .with-api
+  needs: ["api-regression"]
+  timeout: 30 minutes
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: manual
+      allow_failure: true
+  script:
+    - apt-get update -qq && apt-get install -y -qq openjdk-17-jre-headless > /dev/null
+    - |
+      curl -fsSL -o /tmp/jmeter.tgz "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz" \
+        || curl -fsSL -o /tmp/jmeter.tgz "https://dlcdn.apache.org/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz"
+    - tar -xzf /tmp/jmeter.tgz -C /opt
+    - export PATH="/opt/apache-jmeter-${JMETER_VERSION}/bin:$PATH"
+    - >-
+      jmeter -n -t "$JMETER_DIR/qa-shop-load.jmx"
+      -Jhost=localhost -Jport=3000
+      -Jthreads="$PERF_THREADS" -Jrampup="$PERF_RAMPUP" -Jduration="$PERF_DURATION"
+      -l reports/perf-results.jtl -e -o reports/perf-report
+      -j reports/jmeter.log
+    - >-
+      node "$JMETER_DIR/check-thresholds.js" reports/perf-report
+      --p95="$PERF_P95_MS" --error-pct="$PERF_ERROR_PCT"
+      --label="GET /products/search:2000"
+  artifacts:
+    when: always
+    expire_in: 2 weeks
+    expose_as: "Performance report"
+    paths:
+      - reports/
